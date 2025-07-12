@@ -97,7 +97,7 @@ def callback(data):
 
     # publish_testcloud(data)
 
-if __name__ == "__main__":
+def main():
     rclpy.init()
     node = Node('listener')
     # node = rclpy.create_node
@@ -109,3 +109,6 @@ if __name__ == "__main__":
 
     node.destroy_node()
     rclpy.shutdown()
+
+if __name__ == "__main__":
+    main()
