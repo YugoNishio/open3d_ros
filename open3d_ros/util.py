@@ -1,18 +1,14 @@
 #!/usr/bin/env python
 
-# import roslib
 import rclpy
 from std_msgs.msg import Header
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
 import numpy as np
 import sensor_msgs_py.point_cloud2 as pc2
-
 import open3d as o3d
 
-
 tmp_pcd_name = "/home/yugonishio/ros2_ws/points/tmp_cloud.pcd"
-
 
 FIELDS = [
     PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
@@ -65,48 +61,46 @@ DATA ascii'''
         f.write("\n")
 
     pcd = o3d.io.read_point_cloud(tmp_pcd_name)
-
     return pcd
 
-def publish_pointcloud(output_data, input_data):
-    # convert pcl data format
-    pc_p = np.asarray(output_data.points)
-    pc_c = np.asarray(output_data.colors)
-    tmp_c = np.c_[np.zeros(pc_c.shape[1])]
-    tmp_c = np.floor(pc_c[:,0] * 255) * 2**16 + np.floor(pc_c[:,1] * 255) * 2**8 + np.floor(pc_c[:,2] * 255) # 16bit shift, 8bit shift, 0bit shift
 
-    pc_pc = np.c_[pc_p, tmp_c]
-    pc_pc = np.array([tuple(p) for p in pc_pc], dtype=dtype)
+class PointCloudProcessor(Node):
+    def __init__(self):
+        super().__init__('listener')
+        self.pub = self.create_publisher(PointCloud2, '/output', 1)
+        self.create_subscription(PointCloud2, 'input', self.callback, 10)
 
-    # publish point cloud
-    output = pc2.create_cloud(Header(frame_id=input_data.header.frame_id), FIELDS , pc_pc)
-    # pub.publish(output)
+    def publish_pointcloud(self, output_data, input_data):
+        # convert pcl data format
+        pc_p = np.asarray(output_data.points)
+        pc_c = np.asarray(output_data.colors)
+        tmp_c = np.c_[np.zeros(pc_c.shape[1])]
+        tmp_c = np.floor(pc_c[:,0] * 255) * 2**16 + np.floor(pc_c[:,1] * 255) * 2**8 + np.floor(pc_c[:,2] * 255) # 16bit shift, 8bit shift, 0bit shift
 
-def publish_testcloud(input_data):
-    # publish point cloud
-    output = pc2.create_cloud(Header(frame_id=input_data.header.frame_id), FIELDS , TEST_POINTS)
-    # pub.publish(output)
+        pc_pc = np.c_[pc_p, tmp_c]
+        pc_pc = np.array([tuple(p) for p in pc_pc], dtype=dtype)
 
+        # publish point cloud
+        output = pc2.create_cloud(Header(frame_id=input_data.header.frame_id), FIELDS , pc_pc)
+        self.pub.publish(output)
 
+    def publish_testcloud(self, input_data):
+        # publish point cloud
+        output = pc2.create_cloud(Header(frame_id=input_data.header.frame_id), FIELDS , TEST_POINTS)
+        self.pub.publish(output)
 
-def callback(data):
-    result_pcl = convert_pcl(data)
-    print(result_pcl)
+    def callback(self, data):
+        result_pcl = convert_pcl(data)
+        print(result_pcl)
 
-    publish_pointcloud(result_pcl, data)
+        self.publish_pointcloud(result_pcl, data)
+        # self.publish_testcloud(data)
 
-    # publish_testcloud(data)
 
 def main():
     rclpy.init()
-    node = Node('listener')
-    # node = rclpy.create_node
-
-    # pub = node.create_publisher(PointCloud2, '/output', 1)
-
-    # node.create_subscription(PointCloud2, 'input', callback, 10)
+    node = PointCloudProcessor()
     rclpy.spin(node)
-
     node.destroy_node()
     rclpy.shutdown()
 
