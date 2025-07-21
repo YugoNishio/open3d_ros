@@ -8,6 +8,7 @@ import numpy as np
 import sensor_msgs_py.point_cloud2 as pc2
 import open3d as o3d
 import copy
+from sklearn.cluster import MeanShift
 
 
 tmp_pcd_name = "/home/yugonishio/ros2_ws/points/tmp_cloud.pcd"
@@ -73,6 +74,9 @@ class PointCloudProcessor(Node):
         self.create_subscription(PointCloud2, 'input', self.callback, 10)
 
     def publish_pointcloud(self, output_data, input_data):
+        if input_data is None:
+            return None
+
         # convert pcl data format
         pc_p = np.asarray(output_data.points)
         pc_c = np.asarray(output_data.colors)
@@ -94,10 +98,66 @@ class PointCloudProcessor(Node):
     def crop_points(self, input_data, x1, x2, y1, y2, z1, z2):
         bb_pcd = o3d.geometry.AxisAlignedBoundingBox(
             np.array([[x1], [y1], [z1]]),
-            np.array([[x2], [y2], [z2]]), # -y, -z, x
+            np.array([[x2], [y2], [z2]]),
         )
         cropped_pcd = input_data.crop(bb_pcd)
         return cropped_pcd
+
+    def extract_main_cluster(self, input_data, eps=0.01, min_points=180):
+        # DBSCANクラスタリングにより果実本体を抽出
+        labels = np.array(
+            input_data.cluster_dbscan(eps, min_points, print_progress=True)
+        )
+        # print("labels", labels)
+        valid_labels = labels[labels >= 0]
+        if len(valid_labels) == 0:
+            print(f"クラスタなし: eps={eps}, min_points={min_points}")
+            return input_data  # 何もしないでそのまま出力
+
+        max_label = np.bincount(labels[labels >= 0]).argmax()
+        main_cluster = input_data.select_by_index(np.where(labels == max_label)[0])
+        return main_cluster
+
+    def extract_main_cluster_meanshift(self, input_data, bandwidth=0.02):
+        # 点群座標を numpy 配列に変換
+        points = np.asarray(input_data.points)
+        if len(points) == 0:
+            print("点群が空です")
+            return input_data
+
+        # MeanShiftクラスタリング実行
+        meanshift = MeanShift(bandwidth=bandwidth, bin_seeding=True)
+        meanshift.fit(points)
+        labels = meanshift.labels_
+
+        # クラスタなし対策（念のため）
+        if len(labels) == 0:
+            print(f"クラスタなし: bandwidth={bandwidth}")
+            return input_data
+
+        # 最頻クラスタのインデックス抽出
+        labels = np.array(labels)
+        max_label = np.bincount(labels).argmax()
+        main_cluster_indices = np.where(labels == max_label)[0]
+
+        # 該当クラスタ点群を抽出
+        main_cluster = input_data.select_by_index(main_cluster_indices)
+        return main_cluster
+
+    def radius_outlier_removal(self, input_data, radius=0.01, min_neighbors=150):
+        """
+        指定した半径内に一定数以上の点が存在しない点を除去する。
+
+        Parameters:
+            pcd (open3d.geometry.PointCloud): 入力点群
+            radius (float): 探索半径（例：0.01 = 1cm）
+            min_neighbors (int): 必要最小点数
+
+        Returns:
+            filtered_pcd (open3d.geometry.PointCloud): ノイズ除去後の点群
+        """
+        _, ind = input_data.remove_radius_outlier(nb_points=min_neighbors, radius=radius)
+        return input_data.select_by_index(ind)
     
     def pca_points(self, input_data):
         points = np.asarray(input_data.points)
@@ -106,7 +166,7 @@ class PointCloudProcessor(Node):
 
         if points_clean.shape[0] < 3:
             print("点が足りません")
-            return
+            return None
 
         center = np.mean(np.asarray(input_data.points), axis=0)
         cov = np.cov(points_clean.T)
@@ -140,13 +200,6 @@ class PointCloudProcessor(Node):
                     pc2 *= -1
         if pc2[0] > 0:
             pc2 *= -1
-    
-        # print("pc1", np.shape(pc1))
-        # print("pc1", pc1)
-        # print("pc2", np.shape(pc2))
-        # print("pc2", pc2)
-        # print("pc3", np.shape(pc3))
-        # print("pc3", pc3)
 
         # 矢印（Open3Dのarrowプリミティブ）を生成
         arrow1 = o3d.geometry.TriangleMesh.create_arrow(cylinder_radius=0.002,
@@ -209,61 +262,115 @@ class PointCloudProcessor(Node):
         vis.run()
         vis.destroy_window()
 
-    def find_object_end_and_send_tf(self, input_data, center, pc1, pc2, pc3):
+    def find_object_end_and_send_tf(self, input_data, center, pc1, pc2, pc3, num_layers=50, threshold_peduncle_layer_points_count=50):
         points = np.asarray(input_data.points) # 点群の座標を全列挙
         if len(points) < 10:
-            print("points", points)
             return None
-
-        print("points", points)
-
-
-        # 単位ベクトルで座標系構築
-        # z_axis = pc1 / np.linalg.norm(pc1)
-        # y_axis = pc2 - np.dot(pc2, z_axis) * z_axis
-        # y_axis /= np.linalg.norm(y_axis)
-        # x_axis = np.cross(y_axis, z_axis)
 
         # 単位ベクトル
         z_axis = pc1 / np.linalg.norm(pc1)
         y_axis = pc2 / np.linalg.norm(pc2)
         x_axis = pc3 / np.linalg.norm(pc3)
 
-        # ローカル座標系に変換
         centered = points - center # centerからの相対座標の点群座標
         z_coords = centered @ z_axis  # 各点のpc1方向の座標（スカラー）
+        y_coords = centered @ y_axis
+        x_coords = centered @ x_axis
 
-        # Z軸方向の遠い点群の上位down_point個の中から一番小さい要素を探す
-        down_point = 50 # この値に根拠はない．ダウンサンプリングの値によっても変化する
-        top_num_indices = np.argsort(z_coords)[-down_point:]
-        # 上位10個の中で最も値が小さい要素を探す
-        top_num_z_coords = z_coords[top_num_indices]
-        min_idx = np.argmin(top_num_z_coords)
-        # 元のz_coordsに対するインデックスに変換
-        selected_idx = top_num_indices[min_idx]
+        min_index = np.argmin(z_coords)
+        max_index = np.argmax(z_coords)
+        z_min_proj = z_coords[min_index]
+        z_max_proj = z_coords[max_index]
 
-        edge_local_z = z_coords[selected_idx]
-        edge_world = edge_local_z * z_axis  # pc1方向最大の位置
+        z_linspace = np.linspace(z_min_proj, z_max_proj, num_layers + 1) # 最小と最大からz軸方向に等分する
+        z_indices = np.array([np.abs(z_coords - val).argmin() for val in z_linspace]) # 等分した座標から一番近い点を持つ要素
+        z_edges = z_coords[z_indices] # 等分した値の点群座標（z軸方向のみ）
+        y_edges = y_coords[z_indices]
+        x_edges = x_coords[z_indices]
 
-        print("pc1", pc1)
-        print("z_axis", z_axis)
+        layer_counts = []
+        for i in range(len(z_edges) - 1):
+            mask = (z_coords >= z_edges[i]) & (z_coords < z_edges[i+1])
+            count = np.count_nonzero(mask)
+            layer_counts.append(count)
+        
+        # 点群の数がthreshold_peduncle_layer_points_count以下の層を抽出
+        threshold_list = []
+        layer_counts = np.array(layer_counts)
+        threshold_list = np.where(layer_counts <= threshold_peduncle_layer_points_count)[0]
+        
+        # centerより上にある点群のみ取り扱う
+        #（threshold_peduncle_layer_points_countだけだと果実の先端も果柄付け根の候補に入る）
+        layer_center = round(num_layers / 2) + 1
+        threshold_list = threshold_list[threshold_list >= layer_center]
 
-        print("points", points)
-        print("center", center)
-        print("centered", centered)
-        print("z_coords", z_coords)
-        print("selected_idx", selected_idx)
-        print("edge_local_z", edge_local_z)
-        print("!!!!!!!!!!!!!!", edge_world)
+        # # threshold_listが示す座標とcenterの距離が一番小さい軸を果柄の付け根の中心とする
+        # distance_list = []
+        # for i in range(len(threshold_list)):
+        #     idx = threshold_list[i]
+        #     peduncle_base_pos = (x_edges[idx] * x_axis) + (y_edges[idx] * y_axis) # + z_edges[idx] * z_axis
+        #     center_xy = center[:2]
+        #     peduncle_xy = peduncle_base_pos[:2]
+        #     dist = np.linalg.norm(center_xy - peduncle_xy)
+        #     distance_list.append(dist)
 
-        return edge_world, pc3, -pc1, pc2
-        # return edge_world, pc1, pc2, pc3
+        # if not distance_list:
+        #     print("果柄付け根の基準が見つかりません.引数threshold_peduncle_layer_points_countの値を高くしてください")
+        #     return None
+        # index_index = np.argmin(distance_list)
 
+        # 最もZ軸上方向に存在する点群を果柄の付け根の中心とする
+        if len(threshold_list) == 0:
+            self.get_logger().warn("threshold_list is empty.")
+            return None
+        index_index = np.argmax(threshold_list)
+        peduncle_index = threshold_list[index_index]
+        # edge_world = center + (x_edges[peduncle_index] * x_axis) + (y_edges[peduncle_index] * y_axis) + (z_edges[peduncle_index] * z_axis)
+        # edge_world = center + (x_edges[peduncle_index] * x_axis) + (z_edges[peduncle_index] * z_axis)
+        edge_world = center + (z_edges[peduncle_index] * z_axis)
+        # edge_world = center + (y_edges[peduncle_index] * y_axis) + (z_edges[peduncle_index] * z_axis)
+
+        return edge_world, pc1, pc2, pc3
+
+
+    def detect_stem_root(self, input_data, pc1, pc2, center, num_layers=20, threshold=30):
+        # 点群座標取得
+        points = np.asarray(input_data.points)
+        points_centered = points - center
+
+        pc1_unit = pc1 / np.linalg.norm(pc1)
+        pc2_unit = pc2 / np.linalg.norm(pc2)
+
+        # 第2主成分方向（pc2）に沿って投影
+        projections = points_centered @ pc2_unit  # 各点をpc2軸に射影
+
+        # スライス（層）分割
+        min_proj, max_proj = projections.min(), projections.max()
+        edges = np.linspace(min_proj, max_proj, num_layers + 1)
+
+        for i in range(num_layers):
+            mask = (projections >= edges[i]) & (projections < edges[i+1])
+            layer_points = points_centered[mask]
+            
+            if len(layer_points) <= threshold:
+                # 第1主成分軸（pc1）との距離を計算
+                dists = np.abs(layer_points @ pc1_unit)  # 軸との垂直距離
+
+                if len(dists) == 0:
+                    continue
+
+                # 最も近い点（根本）を抽出
+                min_idx = np.argmin(dists)
+                root_local = layer_points[min_idx]
+                root_global = root_local + center
+                return root_global, pc1_unit
+
+        return None, None
 
 
     def callback(self, data):
         result_pcl = convert_pcl(data)
-        print(result_pcl)
+        # print(result_pcl)
 
         self.publish_pointcloud(result_pcl, data)
         # self.publish_testcloud(data)
