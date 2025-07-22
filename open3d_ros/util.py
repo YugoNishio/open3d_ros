@@ -262,6 +262,29 @@ class PointCloudProcessor(Node):
         vis.run()
         vis.destroy_window()
 
+    def pointcloud_visualize(self, input_data):
+        points = np.asarray(input_data.points) # 点群の座標を全列挙
+        if len(points) < 10:
+            return None
+
+        center = np.mean(np.asarray(input_data.points), axis=0)
+
+        # --- Visualizer で視点設定 ---
+        vis = o3d.visualization.Visualizer()
+        # 画面表示のサイズ
+        vis.create_window(window_name='PCA View', width=800, height=600, left=100, top=100)
+
+        vis.add_geometry(input_data)
+
+        view_ctl = vis.get_view_control()
+        view_ctl.set_front([0, 0, -1])
+        view_ctl.set_up([0, -1, 0])
+        view_ctl.set_lookat(center.tolist())
+        view_ctl.set_zoom(0.8)
+
+        vis.run()
+        vis.destroy_window()
+
     def find_object_end_and_send_tf(self, input_data, center, pc1, pc2, pc3, num_layers=50, threshold_peduncle_layer_points_count=50):
         points = np.asarray(input_data.points) # 点群の座標を全列挙
         if len(points) < 10:
