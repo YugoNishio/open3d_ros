@@ -157,6 +157,11 @@ class PointCloudProcessor(Node):
             filtered_pcd (open3d.geometry.PointCloud): ノイズ除去後の点群
         """
         _, ind = input_data.remove_radius_outlier(nb_points=min_neighbors, radius=radius)
+        
+        points = np.asarray(input_data.select_by_index(ind).points) # 点群の座標を全列挙
+        if len(points) < 10:
+            return input_data # フィルタリングし過ぎたらそのまま出力
+
         return input_data.select_by_index(ind)
     
     def pca_points(self, input_data):
@@ -288,6 +293,7 @@ class PointCloudProcessor(Node):
     def find_object_end_and_send_tf(self, input_data, center, pc1, pc2, pc3, num_layers=50, threshold_peduncle_layer_points_count=50):
         points = np.asarray(input_data.points) # 点群の座標を全列挙
         if len(points) < 10:
+            print("len(points) < 10")
             return None
 
         # 単位ベクトル
@@ -346,6 +352,7 @@ class PointCloudProcessor(Node):
         if len(threshold_list) == 0:
             self.get_logger().warn("threshold_list is empty.")
             return None
+        print("threshold_list", threshold_list)
         index_index = np.argmax(threshold_list)
         peduncle_index = threshold_list[index_index]
         # edge_world = center + (x_edges[peduncle_index] * x_axis) + (y_edges[peduncle_index] * y_axis) + (z_edges[peduncle_index] * z_axis)
