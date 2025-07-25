@@ -103,47 +103,6 @@ class PointCloudProcessor(Node):
         cropped_pcd = input_data.crop(bb_pcd)
         return cropped_pcd
 
-    def extract_main_cluster(self, input_data, eps=0.01, min_points=180):
-        # DBSCANクラスタリングにより果実本体を抽出
-        labels = np.array(
-            input_data.cluster_dbscan(eps, min_points, print_progress=True)
-        )
-        # print("labels", labels)
-        valid_labels = labels[labels >= 0]
-        if len(valid_labels) == 0:
-            print(f"クラスタなし: eps={eps}, min_points={min_points}")
-            return input_data  # 何もしないでそのまま出力
-
-        max_label = np.bincount(labels[labels >= 0]).argmax()
-        main_cluster = input_data.select_by_index(np.where(labels == max_label)[0])
-        return main_cluster
-
-    def extract_main_cluster_meanshift(self, input_data, bandwidth=0.02):
-        # 点群座標を numpy 配列に変換
-        points = np.asarray(input_data.points)
-        if len(points) == 0:
-            print("点群が空です")
-            return input_data
-
-        # MeanShiftクラスタリング実行
-        meanshift = MeanShift(bandwidth=bandwidth, bin_seeding=True)
-        meanshift.fit(points)
-        labels = meanshift.labels_
-
-        # クラスタなし対策（念のため）
-        if len(labels) == 0:
-            print(f"クラスタなし: bandwidth={bandwidth}")
-            return input_data
-
-        # 最頻クラスタのインデックス抽出
-        labels = np.array(labels)
-        max_label = np.bincount(labels).argmax()
-        main_cluster_indices = np.where(labels == max_label)[0]
-
-        # 該当クラスタ点群を抽出
-        main_cluster = input_data.select_by_index(main_cluster_indices)
-        return main_cluster
-
     def radius_outlier_removal(self, input_data, radius=0.01, min_neighbors=150):
         """
         指定した半径内に一定数以上の点が存在しない点を除去する。
@@ -160,8 +119,10 @@ class PointCloudProcessor(Node):
         
         points = np.asarray(input_data.select_by_index(ind).points) # 点群の座標を全列挙
         if len(points) < 10:
+            print("フィルタ無無無無無無無無無無無")
             return input_data # フィルタリングし過ぎたらそのまま出力
 
+        print("フィルタ有有有有有有有有有有有")
         return input_data.select_by_index(ind)
     
     def pca_points(self, input_data):
@@ -290,7 +251,7 @@ class PointCloudProcessor(Node):
         vis.run()
         vis.destroy_window()
 
-    def find_object_end_and_send_tf(self, input_data, center, pc1, pc2, pc3, num_layers=50, threshold_peduncle_layer_points_count=50):
+    def find_object_end_and_send_tf(self, input_data, center, pc1, pc2, pc3, num_layers=50, threshold_peduncle_layer_points_count=50, threshold_peduncle_distance = 0.008):
         points = np.asarray(input_data.points) # 点群の座標を全列挙
         if len(points) < 10:
             print("len(points) < 10")
@@ -320,7 +281,7 @@ class PointCloudProcessor(Node):
         layer_counts = []
         for i in range(len(z_edges) - 1):
             mask = (z_coords >= z_edges[i]) & (z_coords < z_edges[i+1])
-            count = np.count_nonzero(mask)
+            count = np.count_nonzero(mask) # maskの条件を満たす点群数をカウント
             layer_counts.append(count)
         
         # 点群の数がthreshold_peduncle_layer_points_count以下の層を抽出
@@ -330,35 +291,52 @@ class PointCloudProcessor(Node):
         
         # centerより上にある点群のみ取り扱う
         #（threshold_peduncle_layer_points_countだけだと果実の先端も果柄付け根の候補に入る）
+        # threshold_list:条件に該当する層が何層目であるか下からカウントしていく．最大の層はnum_layers - 1の値
         layer_center = round(num_layers / 2) + 1
         threshold_list = threshold_list[threshold_list >= layer_center]
 
-        # # threshold_listが示す座標とcenterの距離が一番小さい軸を果柄の付け根の中心とする
-        # distance_list = []
-        # for i in range(len(threshold_list)):
-        #     idx = threshold_list[i]
-        #     peduncle_base_pos = (x_edges[idx] * x_axis) + (y_edges[idx] * y_axis) # + z_edges[idx] * z_axis
-        #     center_xy = center[:2]
-        #     peduncle_xy = peduncle_base_pos[:2]
-        #     dist = np.linalg.norm(center_xy - peduncle_xy)
-        #     distance_list.append(dist)
+        # 果実中心から果実の端までの距離を取得
+        # z_edges[layer_center] ～ z_edges[layer_center + 1] に属する点群を抽出
+        mask_center = (z_coords >= z_edges[layer_center]) & (z_coords < z_edges[layer_center + 1])
+        x_center = x_coords[mask_center]
+        y_center = y_coords[mask_center]
+        z_center = z_coords[mask_center]
+        if len(y_center) > 0:
+            # 果実の中心からの横幅を取得，y軸方向プラスとマイナスのどちらも取得
+            y_max_idx = np.argmax(y_center) 
+            y_min_idx = np.argmin(y_center)
+            max_point = (x_center[y_max_idx], y_center[y_max_idx], z_center[y_max_idx])
+            min_point = (x_center[y_min_idx], y_center[y_min_idx], z_center[y_min_idx])
+            # 中心から左右の幅の平均を取る．（2つのデータから平均を取ったほうが距離の精度が良いと予想）
+            avg_abs_y = (abs(y_center[y_max_idx]) + abs(y_center[y_min_idx])) / 2
+        else:
+            print("layer_centerに点群が存在しません")
+            return None
 
-        # if not distance_list:
-        #     print("果柄付け根の基準が見つかりません.引数threshold_peduncle_layer_points_countの値を高くしてください")
-        #     return None
-        # index_index = np.argmin(distance_list)
-
-        # 最もZ軸上方向に存在する点群を果柄の付け根の中心とする
         if len(threshold_list) == 0:
             self.get_logger().warn("threshold_list is empty.")
             return None
-        print("threshold_list", threshold_list)
+
+        # 最もZ軸上方向に存在する点群を果柄の付け根の中心とする
         index_index = np.argmax(threshold_list)
+        threshold_layer_index = threshold_list[index_index]
+        # print("threshold_layer_index", threshold_layer_index)
+        x_threshold = x_edges[threshold_layer_index] # 果柄と推定した座標の深度
+        x_center = x_edges[layer_center] # 果実中心に一番近い点群の深度
+
         peduncle_index = threshold_list[index_index]
-        # edge_world = center + (x_edges[peduncle_index] * x_axis) + (y_edges[peduncle_index] * y_axis) + (z_edges[peduncle_index] * z_axis)
-        # edge_world = center + (x_edges[peduncle_index] * x_axis) + (z_edges[peduncle_index] * z_axis)
-        edge_world = center + (z_edges[peduncle_index] * z_axis)
-        # edge_world = center + (y_edges[peduncle_index] * y_axis) + (z_edges[peduncle_index] * z_axis)
+        if x_threshold > 0.008: # 中心と果柄の付け根で検出した深度に差がある場合
+            # 検出したそのままの座標を送る，多分果柄まで点群で取得できている
+            edge_world = center + (z_edges[peduncle_index] * z_axis) +  (x_edges[peduncle_index] * x_axis)
+            print("補正無無無無無無無無無無!!!!!!!!!!!!!")
+        else: # 中心と奥行きの差がない場合，果柄まで点群が見えていないので奥行き方向にオフセットを掛ける．
+            # 果実の横半分の距離の分，奥行き方向にオフセットを掛ける
+            edge_world = center + (z_edges[peduncle_index] * z_axis) + (avg_abs_y * x_axis)
+            print("補正有有有有有有有有有有!!!!!!!!!!!!!")
+        
+        print("edge_world", edge_world)
+
+
 
         return edge_world, pc1, pc2, pc3
 
