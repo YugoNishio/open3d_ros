@@ -72,9 +72,10 @@ class PointCloudProcessor(Node):
         super().__init__('listener')
         self.pub = self.create_publisher(PointCloud2, '/output', 1)
         self.create_subscription(PointCloud2, 'input', self.callback, 10)
+        self.filter_under_cut = 0
 
     def publish_pointcloud(self, output_data, input_data):
-        if input_data is None:
+        if input_data is None or output_data is None:
             return None
 
         # convert pcl data format
@@ -103,7 +104,7 @@ class PointCloudProcessor(Node):
         cropped_pcd = input_data.crop(bb_pcd)
         return cropped_pcd
 
-    def radius_outlier_removal(self, input_data, radius=0.01, min_neighbors=150):
+    def radius_outlier_removal(self, input_data, radius=0.01, min_neighbors=150, filter_under_cut = 200):
         """
         指定した半径内に一定数以上の点が存在しない点を除去する。
 
@@ -115,17 +116,29 @@ class PointCloudProcessor(Node):
         Returns:
             filtered_pcd (open3d.geometry.PointCloud): ノイズ除去後の点群
         """
+        self.filter_under_cut = filter_under_cut
+
+        if input_data is None:
+            self.get_logger().warn("点群が以下のため計算しません  = {}".format(self.filter_under_cut + 100))
+            return None
+
         _, ind = input_data.remove_radius_outlier(nb_points=min_neighbors, radius=radius)
         
         points = np.asarray(input_data.select_by_index(ind).points) # 点群の座標を全列挙
-        if len(points) < 10:
+        if len(points) < self.filter_under_cut:
             print("フィルタ無無無無無無無無無無無")
             return input_data # フィルタリングし過ぎたらそのまま出力
-
-        print("フィルタ有有有有有有有有有有有")
-        return input_data.select_by_index(ind)
+        elif len(points) < self.filter_under_cut + 200: # filter_under_cut + 100個の点群以下は出力しない
+            return None # フィルタリングする点群数の下限を設定．この値を下回るなら主成分分析にまわさない
+        else:
+            print("フィルタ有有有有有有有有有有有")
+            return input_data.select_by_index(ind)
     
     def pca_points(self, input_data):
+        if input_data is None:
+            self.get_logger().warn("点群が以下のため計算しません = {}".format(self.filter_under_cut + 100))
+            return None
+
         points = np.asarray(input_data.points)
         mask = np.all(np.isfinite(points), axis=1)
         points_clean = points[mask]
@@ -209,7 +222,16 @@ class PointCloudProcessor(Node):
 
         center = np.mean(np.asarray(input_data.points), axis=0)
 
+        # --- Visualizer で視点設定 --- 点群の座標を全列挙
+        if len(points) < 10:
+            return None
+
+        center = np.mean(np.asarray(input_data.points), axis=0)
+
         # --- Visualizer で視点設定 ---
+        vis = o3d.visualization.Visualizer()
+        # 画面表示のサイズ
+        vis.create_window(window_name='PCA View')
         vis = o3d.visualization.Visualizer()
         # 画面表示のサイズ
         vis.create_window(window_name='PCA View', width=800, height=600, left=100, top=100)
@@ -252,10 +274,13 @@ class PointCloudProcessor(Node):
         vis.destroy_window()
 
     def find_object_end_and_send_tf(self, input_data, center, pc1, pc2, pc3, num_layers=50, threshold_peduncle_layer_points_count=50, threshold_peduncle_distance = 0.008):
-        points = np.asarray(input_data.points) # 点群の座標を全列挙
-        if len(points) < 10:
-            print("len(points) < 10")
+        # if len(points) < 100:
+        #     print("len(points) < 100")
+        #     return None
+        if input_data is None:
             return None
+
+        points = np.asarray(input_data.points) # 点群の座標を全列挙
 
         # 単位ベクトル
         z_axis = pc1 / np.linalg.norm(pc1)
